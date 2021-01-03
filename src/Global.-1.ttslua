@@ -555,8 +555,8 @@ function clueEntered(player, value)
       return
     end
 
-    -- Remove the newline, trim the clue, and convert to lowercase
-    value = value:gsub("\n", ""):match("%s*(.-)%s*$"):lower()
+    -- Remove the newline, trim the clue
+    value = value:gsub("\n", ""):match("%s*(.-)%s*$")
 
     -- Parse the entered clue into its respective parts
     local clue, number, error = getClueDetails(value)
@@ -628,8 +628,8 @@ function getClueDetails(processedClue)
     end
 
     local checks = {
-      "^(%a+)(%s*)(%d+)$",
-      "^(%a+)(%s+)(inf)$"
+      "^(.+)(%s*)(%d+)$",
+      "^(.+)(%s+)(inf)$"
     }
 
     for _, check in ipairs(checks) do
@@ -654,10 +654,10 @@ function getClueDetails(processedClue)
     end
 
     local checks = {
-      "^(%a+%-%a+)(%s*)(%d+)$",
-      "^(%a+%-%a+)(%s+)(inf)$",
-      "^(%a+)(%s*%-%s*)(%d+)$",
-      "^(%a+)(%s*%-%s*)(inf)$"
+      "^(.+%-.+)(%s*)(%d+)$",
+      "^(.+%-.+)(%s+)(inf)$",
+      "^(.+)(%s*%-%s*)(%d+)$",
+      "^(.+)(%s*%-%s*)(inf)$"
     }
 
     for _, check in ipairs(checks) do
@@ -681,8 +681,8 @@ function getClueDetails(processedClue)
     end
 
     local checks = {
-      "^(%a+%-%a+)(%s*%-%s*)(%d+)$",
-      "^(%a+%-%a+)(%s*%-%s*)(inf)$"
+      "^(.+%-.+)(%s*%-%s*)(%d+)$",
+      "^(.+%-.+)(%s*%-%s*)(inf)$"
     }
 
     for _, check in ipairs(checks) do
