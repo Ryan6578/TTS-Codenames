@@ -232,6 +232,64 @@ analytics =
   sessions  = {}
 }
 
+----------[ Character sets ]----------
+spaceCharacters = {}
+for _, code in pairs({32,160,5760,6158,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8203,8239,8287,12288,65279}) do
+  spaceCharacters[code] = true
+end
+
+hyphenCharacters = {}
+for _, code in pairs({45,8208,8209,8210,8211,8212,8213,11834,11835,65112,65123,65293}) do
+  hyphenCharacters[code] = true
+end
+
+digitCharacters = {}
+for code = 0x30, 0x39 do
+  digitCharacters[code] = true
+end
+
+whitespaceCharacters = {}
+for _, code in pairs({9,10,11,12,13}) do
+  whitespaceCharacters[code] = true
+end
+for code, _ in pairs(spaceCharacters) do
+  whitespaceCharacters[code] = true
+end
+
+illegalCharacters   = {}
+-- before uppercase letters
+for code = 0, 64 do
+  illegalCharacters[code] = true
+end
+-- before lowercase letters
+for code = 91, 96 do
+  illegalCharacters[code] = true
+end
+-- before accented letters
+for code = 123, 191 do
+  illegalCharacters[code] = true
+end
+-- multiplication and division sign
+for _, code in pairs({215, 247}) do
+  illegalCharacters[code] = true
+end
+-- symbols
+for code = 448, 435 do
+   illegalCharacters[code] = true
+end
+-- symbols
+for code = 688, 879 do
+  illegalCharacters[code] = true
+end
+-- include hyphens
+for code, _ in pairs(hyphenCharacters) do
+  illegalCharacters[code] = true
+end
+-- include space characters
+for code, _ in pairs(spaceCharacters) do
+  illegalCharacters[code] = true
+end
+
 function onload(saveState)
 
   -- Codenames script version
@@ -262,6 +320,9 @@ function onload(saveState)
   extraRed.interactable       = false
   redToken.interactable       = false
   blueToken.interactable      = false
+
+  -- Create variable for storing typed clues
+  currentEnteredClue = {}
 
   -- Get the list of decks
   api_getDecks()
@@ -498,8 +559,25 @@ function searchDecks(searchTerm)
 end
 
 function clueEntered(player, value)
-  if value:match("\n") then
-    local color = player.color
+  -- Because of how MoonSharp handles its matching expressions,
+  -- absolutely no expression matching from the string library can be used for unicode clues.
+  -- It converts all characters to values 0..255 before running the expression on it.
+  -- eg. %s will match all characters with codes 0x0A, 0x20, 0x10A, 0x400A, 0x7020
+  -- string.lower upper find etc. work fine and properly even for other character sets
+
+  local color = player.color
+  local newLineInd = string.find(value, "\n")
+  if newLineInd == nil then
+    -- Save the clue for when the user presses enter
+    currentEnteredClue[color] = value
+  else
+    -- Get the clue from before the user pressed enter
+    if currentEnteredClue[color] then
+      value = currentEnteredClue[color]
+      currentEnteredClue[color] = nil
+    else
+      value = ""
+    end
 
     -- Reset the text box
     local resetInput = {
@@ -507,6 +585,17 @@ function clueEntered(player, value)
       placeholder   = "Enter clue here"
     }
     UI.setAttributes(color:lower() .. "ClueText", resetInput)
+
+    --if the clue is empty then do nothing
+    if #value == 0 then
+      return
+    end
+
+    -- if the clue is long, dont bother processing it
+    if #value > 50 then
+      Player[color].broadcast("[a020f0]» [da1918]ERROR: [ffffff]Invalid clue. Please enter a valid clue and push ENTER! [a020f0]«", redColor)
+      return
+    end
 
     -- if the game hasn't been started, a clue cannot be entered
     if gameState.status ~= 1 then
@@ -519,9 +608,6 @@ function clueEntered(player, value)
       Player[color].broadcast("[a020f0]» [da1918]ERROR: [ffffff]It's not your turn to enter a clue! [a020f0]«")
       return
     end
-
-    -- Remove the newline, trim the clue, and convert to lowercase
-    value = value:gsub("\n", ""):match("%s*(.-)%s*$"):lower()
 
     -- Parse the entered clue into its respective parts
     local clue, number, error = getClueDetails(value)
@@ -552,10 +638,10 @@ function clueEntered(player, value)
     -- Track remaining clues
     if number == "inf" then
       gameState.guessesLeft = -1
-    elseif number == "0" then
+    elseif tonumber(number) == 0 then
       gameState.guessesLeft = -1
     else
-      gameState.guessesLeft = tostring(number) + 1
+      gameState.guessesLeft = tonumber(number) + 1
     end
 
     -- Encode the finished clue
@@ -564,99 +650,133 @@ function clueEntered(player, value)
     -- Enable voting for the current team
     gameState.canVote = true
 
-    -- Send analytics data for the a new clue
+    -- Send analytics data for the new clue
     api_newClue(clue, (number == "inf" and -1 or number), Player[color].steam_id)
   end
 end
 
 function getClueDetails(processedClue)
-  -- How many hyphens are there?
-  local clue, number
-  local _, hyphenCount = string.gsub(processedClue, "%-", "")
-  local _, spaceCount = string.gsub(processedClue, "%s", "")
+  local clueState = {}
+  clueState.PRE_WHITESPACE = 1
+  clueState.INF_N = 2
+  clueState.INF_I = 3
+  clueState.NUMBER = 4
+  clueState.INF_WHITESPACE = 5 -- inf must have 1 space before clue
+  clueState.PRE_CLUE_WHITESPACE = 6 -- this state allows for 1 hyphen
+  clueState.CLUE = 7 -- the clue allows 1 hyphen
+  clueState.POST_WHITESPACE = 8
 
-  if hyphenCount == 0 then
-    -- Single word with space (or no space) as delimiter
-    if spaceCount > 1 then
+  local clue = ""
+  local number = ""
+
+  local invalid = false
+  local state = clueState.PRE_WHITESPACE
+  local hyphenCount = 0
+  -- process clue backwards as it is easier
+  for ind = #processedClue, 1, -1 do
+    -- This state machine will detect an invalid clue and stop processing if it
+    -- finds an invalid character before it reaches the beginning of the input
+    local ch = string.sub(processedClue,ind,ind)
+    local code = string.unicode(ch)
+    if state == clueState.PRE_WHITESPACE then
+      if string.lower(ch) == "f" then
+        state = clueState.INF_N
+        number = "inf"
+      elseif digitCharacters[code] then
+        state = clueState.NUMBER
+        number = ch..number
+      elseif whitespaceCharacters[code] then
+        -- continue
+      else
+        invalid = true
+      end
+    elseif state == clueState.INF_N then
+      if string.lower(ch) == "n" then
+        state = clueState.INF_I
+      else
+        invalid = true
+      end
+    elseif state == clueState.INF_I then
+      if string.lower(ch) == "i" then
+        state = clueState.INF_WHITESPACE
+      else
+        invalid = true
+      end
+    elseif state == clueState.NUMBER then
+      if digitCharacters[code] then
+        number = ch..number
+      elseif whitespaceCharacters[code] then
+        state = clueState.PRE_CLUE_WHITESPACE
+      elseif hyphenCharacters[code] then
+        state = clueState.PRE_CLUE_WHITESPACE
+        hyphenCount = hyphenCount + 1
+      elseif illegalCharacters[code] then
+        invalid = true
+      else
+        state = clueState.CLUE
+        hyphenCount = 0
+        clue = ch..clue
+      end
+    elseif state == clueState.INF_WHITESPACE then
+      if whitespaceCharacters[code] then
+        state = clueState.PRE_CLUE_WHITESPACE
+      elseif hyphenCharacters[code] then
+        state = clueState.PRE_CLUE_WHITESPACE
+        hyphenCount = hyphenCount + 1
+      else
+        invalid = true
+      end
+    elseif state == clueState.PRE_CLUE_WHITESPACE then
+      if whitespaceCharacters[code] then
+        -- continue
+      elseif hyphenCharacters[code] and hyphenCount < 1 then
+        hyphenCount = hyphenCount + 1
+      elseif illegalCharacters[code] then
+        invalid = true
+      else
+        state = clueState.CLUE
+        hyphenCount = 0
+        clue = ch..clue
+      end
+    elseif state == clueState.CLUE then
+      if whitespaceCharacters[code] then
+        state = clueState.POST_WHITESPACE
+      elseif hyphenCharacters[code] and hyphenCount < 1 and ind != 1 then
+        hyphenCount = hyphenCount + 1
+        clue = ch..clue
+      elseif illegalCharacters[code] then
+        invalid = true
+      else
+        clue = ch..clue
+      end
+    elseif state == clueState.POST_WHITESPACE then
+      if whitespaceCharacters[code] then
+        -- continue
+      else
+        invalid = true
+      end
+    else
+      invalid = true -- we should never reach here
+    end
+
+    if invalid then
+      -- This is an invalid clue
       return nil, nil, true
     end
+  end
 
-    local checks = {
-      "^(%a+)(%s*)(%d+)$",
-      "^(%a+)(%s+)(inf)$"
-    }
-
-    for _, check in ipairs(checks) do
-      local status, clue, _, number = pcall(function() return string.match(processedClue, check) end)
-      if status then
-        -- Parsing successful - check for nil values just in case
-        if clue != nil and number != nil then
-          -- Return the clue and number
-          return clue, number, false
-        end
-      end
-    end
-
-    -- No valid clues detected
-    return nil, nil, true
-
-  elseif hyphenCount == 1 then
-    -- Either a hypenated word with a space (or no space) as delimiter
-    -- or a single word with a hyphen (and possibly spaces) as delimiter
-    if spaceCount > 2 then
-      return nil, nil, true
-    end
-
-    local checks = {
-      "^(%a+%-%a+)(%s*)(%d+)$",
-      "^(%a+%-%a+)(%s+)(inf)$",
-      "^(%a+)(%s*%-%s*)(%d+)$",
-      "^(%a+)(%s*%-%s*)(inf)$"
-    }
-
-    for _, check in ipairs(checks) do
-      local status, clue, _, number = pcall(function() return string.match(processedClue, check) end)
-      if status then
-        -- Parsing successful - check for nil values just in case
-        if clue != nil and number != nil then
-          -- Return the clue and number
-          return clue, number, false
-        end
-      end
-    end
-
-    -- No valid clues detected
-    return nil, nil, true
-
-  elseif hyphenCount == 2 then
-
-    if spaceCount > 2 then
-      return nil, nil, true
-    end
-
-    local checks = {
-      "^(%a+%-%a+)(%s*%-%s*)(%d+)$",
-      "^(%a+%-%a+)(%s*%-%s*)(inf)$"
-    }
-
-    for _, check in ipairs(checks) do
-      local status, clue, _, number = pcall(function() return string.match(processedClue, check) end)
-      if status then
-        -- Parsing successful - check for nil values just in case
-        if clue != nil and number != nil then
-          -- Return the clue and number
-          return clue, number, false
-        end
-      end
-    end
-
-    -- No valid clues detected
-    return nil, nil, true
-
-  else
-    -- Clue has too many hyphens
+  if clue == "" then
+    -- This is an invalid clue
     return nil, nil, true
   end
+
+  -- Clean number value
+  if number != "inf" then
+    number = tostring(tonumber(number))
+  end
+
+  -- Return the clue and number
+  return clue, number, false
 end
 
 function rotateclues()
