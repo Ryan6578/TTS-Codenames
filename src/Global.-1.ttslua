@@ -521,7 +521,7 @@ function clueEntered(player, value)
     end
 
     -- Remove the newline, trim the clue, and convert to lowercase
-    value = value:gsub("\n", ""):match("%s*(.-)%s*$"):lower()
+    value = value:gsub("\n", ""):match("%s*(.*)%s*$"):lower()
 
     -- Parse the entered clue into its respective parts
     local clue, number, error = getClueDetails(value)
@@ -1621,7 +1621,7 @@ function processChat(message)
     end
   end
 
-  return command, args:gsub("^%s*(.-)%s*$", "%1")
+  return command, args:gsub("^%s*(.*)%s*$", "%1")
 end
 
 function toggleTurns()
